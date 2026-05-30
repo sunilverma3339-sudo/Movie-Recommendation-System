@@ -71,6 +71,7 @@ def build_recommender(df: pd.DataFrame):
 
 def recommend(title: str, df: pd.DataFrame, cosine_sim, indices, top_n: int = 5):
     title_lower = title.strip().lower()
+
     if title_lower not in indices:
         matches = [t for t in indices.index if title_lower in t]
         if not matches:
@@ -78,11 +79,17 @@ def recommend(title: str, df: pd.DataFrame, cosine_sim, indices, top_n: int = 5)
         title_lower = matches[0]
 
     idx = indices[title_lower]
+
+    if isinstance(idx, pd.Series):
+        idx = idx.iloc[0]
+
     sim_scores = sorted(
         list(enumerate(cosine_sim[idx])), key=lambda x: x[1], reverse=True
     )
+
     sim_scores = [s for s in sim_scores if s[0] != idx][: top_n * 3]
     movie_indices = [s[0] for s in sim_scores]
+
     results = df.iloc[movie_indices][["MOVIES", "GENRE", "RATING"]].copy()
     results["ContentSimilarity"] = [round(s[1], 3) for s in sim_scores]
     return results, None
@@ -91,6 +98,7 @@ def recommend(title: str, df: pd.DataFrame, cosine_sim, indices, top_n: int = 5)
 def build_classifier(df: pd.DataFrame):
     mlb = MultiLabelBinarizer()
     y = mlb.fit_transform(df["GENRE_LIST"])
+
     tfidf = TfidfVectorizer(stop_words="english", max_features=15000)
     X = tfidf.fit_transform(df["ONE-LINE"])
 
@@ -122,10 +130,18 @@ def load_user_ratings(path: str = USER_RATINGS_PATH) -> pd.DataFrame:
         df["MOVIES"] = df["MOVIES"].astype(str).str.strip()
     if "rating" in df.columns:
         df["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0)
+
     return df
 
 
-def save_user_rating(movie: str, rating: float, user_id: str = "default", path: str = USER_RATINGS_PATH) -> pd.DataFrame:
+def save_user_rating(
+    movie: str,
+    rating: float,
+    user_id: str = "default",
+    path: str = USER_RATINGS_PATH,
+) -> pd.DataFrame:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+
     movie = movie.strip()
     ratings_df = load_user_ratings(path)
     timestamp = datetime.now().isoformat()
@@ -134,6 +150,7 @@ def save_user_rating(movie: str, rating: float, user_id: str = "default", path: 
         (ratings_df["user_id"] == user_id)
         & (ratings_df["MOVIES"].str.lower() == movie.lower())
     ]
+
     if not same_movie.empty:
         ratings_df.loc[same_movie.index, ["rating", "timestamp"]] = [rating, timestamp]
     else:
@@ -153,6 +170,7 @@ def save_user_rating(movie: str, rating: float, user_id: str = "default", path: 
             ],
             ignore_index=True,
         )
+
     ratings_df.to_csv(path, index=False)
     return ratings_df
 
@@ -160,17 +178,25 @@ def save_user_rating(movie: str, rating: float, user_id: str = "default", path: 
 def build_rating_matrix(ratings_df: pd.DataFrame) -> pd.DataFrame:
     if ratings_df.empty:
         return pd.DataFrame()
+
     return ratings_df.pivot_table(index="user_id", columns="MOVIES", values="rating")
 
 
-def collaborative_recommend(title: str, df: pd.DataFrame, ratings_df: pd.DataFrame, top_n: int = 5):
+def collaborative_recommend(
+    title: str,
+    df: pd.DataFrame,
+    ratings_df: pd.DataFrame,
+    top_n: int = 5,
+):
     if ratings_df.empty or ratings_df["user_id"].nunique() < 2:
         return None, "Not enough user rating history for collaborative filtering."
 
     ratings_pivot = build_rating_matrix(ratings_df)
     item_matrix = ratings_pivot.fillna(0).T
+
     lookup = {movie.lower(): movie for movie in item_matrix.index}
     title_lower = title.strip().lower()
+
     if title_lower not in lookup:
         similarities = [m for m in lookup if title_lower in m]
         if not similarities:
@@ -179,16 +205,25 @@ def collaborative_recommend(title: str, df: pd.DataFrame, ratings_df: pd.DataFra
 
     movie_name = lookup[title_lower]
     idx = list(item_matrix.index).index(movie_name)
+
     item_sim = cosine_similarity(item_matrix)
+
     sim_scores = sorted(
         list(enumerate(item_sim[idx])), key=lambda x: x[1], reverse=True
     )
+
     sim_scores = [s for s in sim_scores if s[0] != idx][: top_n * 3]
     movie_names = [item_matrix.index[s[0]] for s in sim_scores]
 
-    filtered = df[df["MOVIES"].isin(movie_names)][["MOVIES", "GENRE", "RATING"]].copy()
+    filtered = df[df["MOVIES"].isin(movie_names)][
+        ["MOVIES", "GENRE", "RATING"]
+    ].copy()
+
     filtered = filtered.drop_duplicates(subset=["MOVIES"]).head(top_n * 3)
-    filtered["CollaborativeSimilarity"] = [round(s[1], 3) for s in sim_scores[: len(filtered)]]
+    filtered["CollaborativeSimilarity"] = [
+        round(s[1], 3) for s in sim_scores[: len(filtered)]
+    ]
+
     return filtered, None
 
 
@@ -201,26 +236,40 @@ def hybrid_recommend(
     top_n: int = 5,
 ):
     content_results, err = recommend(title, df, cosine_sim, indices, top_n=top_n * 5)
+
     if err:
         return None, err
 
-    collab_results, collab_err = collaborative_recommend(title, df, ratings_df, top_n=top_n * 5)
-    content_map = {row.MOVIES: row.ContentSimilarity for _, row in content_results.iterrows()}
+    collab_results, collab_err = collaborative_recommend(
+        title, df, ratings_df, top_n=top_n * 5
+    )
+
+    content_map = {
+        row.MOVIES: row.ContentSimilarity for _, row in content_results.iterrows()
+    }
+
     collab_map = {}
+
     if collab_results is not None and not collab_err:
-        collab_map = {row.MOVIES: row.CollaborativeSimilarity for _, row in collab_results.iterrows()}
+        collab_map = {
+            row.MOVIES: row.CollaborativeSimilarity
+            for _, row in collab_results.iterrows()
+        }
 
     min_rating = df["RATING"].min() if "RATING" in df.columns else 0
     max_rating = df["RATING"].max() if "RATING" in df.columns else 1
     rating_range = max(max_rating - min_rating, 1)
 
     scored = []
+
     for _, row in content_results.iterrows():
         movie = row.MOVIES
         content_score = float(row.ContentSimilarity)
         collab_score = float(collab_map.get(movie, 0))
         rating_score = (float(row.RATING) - min_rating) / rating_range
+
         total = content_score * 0.55 + collab_score * 0.30 + rating_score * 0.15
+
         scored.append(
             {
                 "MOVIES": movie,
@@ -232,38 +281,59 @@ def hybrid_recommend(
             }
         )
 
-    scored_df = pd.DataFrame(scored).drop_duplicates(subset=["MOVIES"]).sort_values(
-        by=["HybridScore", "ContentSimilarity", "CollaborativeSimilarity"],
-        ascending=False,
-    ).head(top_n)
+    scored_df = (
+        pd.DataFrame(scored)
+        .drop_duplicates(subset=["MOVIES"])
+        .sort_values(
+            by=["HybridScore", "ContentSimilarity", "CollaborativeSimilarity"],
+            ascending=False,
+        )
+        .head(top_n)
+    )
+
     return scored_df.reset_index(drop=True), None
 
 
 def search_movies(query: str, df: pd.DataFrame, max_results: int = 20) -> pd.DataFrame:
     if not query:
         return df[["MOVIES", "GENRE", "RATING"]].head(max_results).copy()
+
     query_lower = query.strip().lower()
+
     matched = df[
         df["MOVIES"].str.lower().str.contains(query_lower, na=False)
         | df["GENRE"].str.lower().str.contains(query_lower, na=False)
         | df["ONE-LINE"].str.lower().str.contains(query_lower, na=False)
     ]
-    return matched[["MOVIES", "GENRE", "RATING"]].drop_duplicates(subset=["MOVIES"]).head(max_results).copy()
+
+    return (
+        matched[["MOVIES", "GENRE", "RATING"]]
+        .drop_duplicates(subset=["MOVIES"])
+        .head(max_results)
+        .copy()
+    )
 
 
 def resolve_movie_title(query: str, df: pd.DataFrame, indices=None):
     normalized = query.strip().lower()
+
     if indices is not None and normalized in indices:
-        return df.loc[indices[normalized], "MOVIES"]
+        idx = indices[normalized]
+
+        if isinstance(idx, pd.Series):
+            idx = idx.iloc[0]
+
+        return df.loc[idx, "MOVIES"]
+
     matches = df[df["MOVIES"].str.lower().str.contains(normalized, na=False)]
+
     if not matches.empty:
         return matches.iloc[0]["MOVIES"]
+
     return None
 
 
 class MovieRecommender:
-    """Shared recommendation module with support for content, collaborative, and hybrid recommendations."""
-
     def __init__(
         self,
         data_path: str = DATA_PATH,
@@ -272,16 +342,19 @@ class MovieRecommender:
     ):
         self.data_path = data_path
         self.ratings_path = ratings_path
+
         self.df = load_and_clean(self.data_path)
         self.ratings_df = load_user_ratings(self.ratings_path)
         self.cosine_sim, self.indices = build_recommender(self.df)
+
         self.classifier = None
         self.tfidf_clf = None
         self.mlb = None
         self.classifier_score = None
+
         if train_classifier:
-            self.classifier, self.tfidf_clf, self.mlb, self.classifier_score = build_classifier(
-                self.df
+            self.classifier, self.tfidf_clf, self.mlb, self.classifier_score = (
+                build_classifier(self.df)
             )
 
     def recommend(self, title: str, top_n: int = 5):
@@ -303,12 +376,15 @@ class MovieRecommender:
     def predict_genre(self, plot: str):
         if self.classifier is None:
             raise RuntimeError("Genre classifier has not been trained.")
+
         return predict_genre(plot, self.classifier, self.tfidf_clf, self.mlb)
 
     def search_movies(self, query: str, max_results: int = 20):
         return search_movies(query, self.df, max_results)
 
-    def save_rating(self, movie: str, rating: float, user_id: str = "default") -> pd.DataFrame:
+    def save_rating(
+        self, movie: str, rating: float, user_id: str = "default"
+    ) -> pd.DataFrame:
         self.ratings_df = save_user_rating(movie, rating, user_id, self.ratings_path)
         return self.ratings_df
 
@@ -318,3 +394,78 @@ class MovieRecommender:
 
     def resolve_movie_title(self, query: str) -> Optional[str]:
         return resolve_movie_title(query, self.df, self.indices)
+
+
+if __name__ == "__main__":
+    print("Loading Movie Recommender System...")
+
+    try:
+        recommender = MovieRecommender(train_classifier=False)
+        print("System ready!")
+    except Exception as e:
+        print("Error loading system:", e)
+        exit()
+
+    while True:
+        print("\n========= MENU =========")
+        print("1. Recommend movies")
+        print("2. Search movies")
+        print("3. Add movie rating")
+        print("4. Predict genre")
+        print("5. Exit")
+
+        choice = input("Choose option: ").strip()
+
+        if choice == "1":
+            movie_name = input("Enter movie name: ").strip()
+            results, error = recommender.hybrid_recommend(movie_name, top_n=5)
+
+            if error:
+                print(error)
+            else:
+                print("\nRecommended Movies:")
+                print(results.to_string(index=False))
+
+        elif choice == "2":
+            query = input("Search movie/genre/plot: ").strip()
+            results = recommender.search_movies(query)
+
+            if results.empty:
+                print("No movies found.")
+            else:
+                print("\nSearch Results:")
+                print(results.to_string(index=False))
+
+        elif choice == "3":
+            movie = input("Movie name: ").strip()
+
+            try:
+                rating = float(input("Your rating 1-10: ").strip())
+
+                if rating < 1 or rating > 10:
+                    print("Rating 1 se 10 ke beech honi chahiye.")
+                else:
+                    recommender.save_rating(movie, rating)
+                    print("Rating saved successfully!")
+
+            except ValueError:
+                print("Please valid number rating enter karo.")
+
+        elif choice == "4":
+            plot = input("Enter movie plot/one-line story: ").strip()
+
+            try:
+                print("Training genre classifier...")
+                recommender_clf = MovieRecommender(train_classifier=True)
+                genres = recommender_clf.predict_genre(plot)
+                print("Predicted Genre:", ", ".join(genres))
+
+            except Exception as e:
+                print("Genre prediction error:", e)
+
+        elif choice == "5":
+            print("Goodbye!")
+            break
+
+        else:
+            print("Invalid option. Try again.")
